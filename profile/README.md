@@ -12,5 +12,6 @@ Less noise. More clarity. Better systems.
 
 If you're ready to build tech that moves your business forward, you could work with us.
 
-Website
-onyani.com
+**Website**
+
+https://onyani.com
