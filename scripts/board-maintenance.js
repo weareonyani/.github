@@ -25,6 +25,13 @@ function isStale(item, now) {
   return now - Date.parse(item.updatedAt) >= STALE_DAYS * DAY_MS;
 }
 
+function missingParentAssignees(item) {
+  if (!item.isIssue) return [];
+  const have = new Set(item.assigneeLogins);
+  const missing = [...new Set(item.subIssueAssignees)].filter((login) => !have.has(login));
+  return missing.slice(0, Math.max(0, MAX_ASSIGNEES - have.size));
+}
+
 function normalize(node) {
   const values = {};
   for (const v of node.fieldValues.nodes) {
