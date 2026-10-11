@@ -23,7 +23,7 @@ jobs:
             const maintenance = require(`${process.env.GITHUB_WORKSPACE}/scripts/board-maintenance.js`);
             await maintenance.run({
               github, context, core,
-              issuesApi: getOctokit(process.env.ISSUES_TOKEN),
+              issuesApi: new github.constructor({ auth: process.env.ISSUES_TOKEN }),
               org: context.repo.owner,
               projectNumber: 1,
             });
