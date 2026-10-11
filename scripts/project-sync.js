@@ -153,17 +153,25 @@ async function setIteration(github, project, itemId, fieldName, iterationId) {
   await setFieldValue(github, project, itemId, project.fields[fieldName].id, { iterationId });
 }
 
-async function boardContent(github, context) {
+function cardsForPullRequest(pr) {
+  return [
+    ...pr.closingIssuesReferences.nodes.map((n) => ({ contentId: n.id, setArea: false })),
+    { contentId: pr.id, setArea: true },
+  ];
+}
+
+async function boardCards(github, context) {
   const payload = context.payload;
-  if (payload.issue && !payload.issue.pull_request) return { ids: [payload.issue.node_id], draft: false, linked: false };
+  if (payload.issue && !payload.issue.pull_request) {
+    return { cards: [{ contentId: payload.issue.node_id, setArea: false }], draft: false };
+  }
 
   const prNumber = payload.pull_request?.number ?? payload.workflow_run?.pull_requests?.[0]?.number;
-  if (!prNumber) return { ids: [], draft: false, linked: false };
+  if (!prNumber) return { cards: [], draft: false };
 
   const { owner, repo } = context.repo;
   const pr = await pullRequestWithLinkedIssues(github, owner, repo, prNumber);
-  const issues = pr.closingIssuesReferences.nodes.map((n) => n.id);
-  return { ids: issues.length ? issues : [pr.id], draft: pr.isDraft, linked: issues.length > 0 };
+  return { cards: cardsForPullRequest(pr), draft: pr.isDraft };
 }
 
 async function syncNewIssue({ github, context, core, project, area }) {
@@ -194,13 +202,13 @@ async function run({ github, context, core, org, projectNumber, area }) {
     return;
   }
 
-  const { ids, draft, linked } = await boardContent(github, context);
+  const { cards, draft } = await boardCards(github, context);
   if (status === STATUS.inReview && draft) status = STATUS.inProgress;
 
-  for (const contentId of ids) {
+  for (const { contentId, setArea } of cards) {
     const itemId = await addItem(github, project.id, contentId);
     await setSingleSelect(github, project, itemId, 'Status', status, core);
-    if (area && !linked) await setSingleSelect(github, project, itemId, 'Area', area, core);
+    if (area && setArea) await setSingleSelect(github, project, itemId, 'Area', area, core);
     core.info(`${contentId} -> ${status}`);
   }
 }
@@ -210,6 +218,7 @@ module.exports = {
   targetStatus,
   parseIssueForm,
   fieldsForNewIssue,
+  cardsForPullRequest,
   iterationEnd,
   currentIteration,
   loadProject,

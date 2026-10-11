@@ -62,3 +62,17 @@ test('current iteration', () => {
   assert.equal(currentIteration(its, '2026-10-26').id, 'b');
   assert.equal(currentIteration(its, '2026-10-11'), null);
 });
+
+const { cardsForPullRequest } = require('./project-sync');
+
+test('PR and its linked issues all get cards; only the PR card takes the repo Area', () => {
+  const pr = { id: 'PR1', closingIssuesReferences: { nodes: [{ id: 'I1' }, { id: 'I2' }] } };
+  assert.deepEqual(cardsForPullRequest(pr), [
+    { contentId: 'I1', setArea: false },
+    { contentId: 'I2', setArea: false },
+    { contentId: 'PR1', setArea: true },
+  ]);
+  assert.deepEqual(cardsForPullRequest({ id: 'PR2', closingIssuesReferences: { nodes: [] } }), [
+    { contentId: 'PR2', setArea: true },
+  ]);
+});
