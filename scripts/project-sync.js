@@ -1,10 +1,13 @@
 const STATUS = {
   backlog: 'Backlog',
+  todo: 'Todo',
   inProgress: 'In Progress',
   inReview: 'In Review',
   blocked: 'Blocked',
   done: 'Done',
 };
+
+const DAY_MS = 24 * 60 * 60 * 1000;
 
 function targetStatus(eventName, payload) {
   const action = payload.action;
@@ -40,6 +43,38 @@ function targetStatus(eventName, payload) {
   return null;
 }
 
+function formAnswer(body, heading) {
+  const match = (body || '').match(new RegExp(`^### ${heading}\\s*\\n+([^\\n]+)`, 'm'));
+  const answer = match && match[1].trim();
+  return answer && answer !== '_No response_' ? answer : null;
+}
+
+function parseIssueForm(body) {
+  const area = formAnswer(body, 'Area');
+  const severity = formAnswer(body, 'Severity');
+  const priority = severity && severity.match(/^P[0-3]\b/);
+  return { area: area ? area.split(',')[0].trim() : null, priority: priority ? priority[0] : null };
+}
+
+function fieldsForNewIssue(body, repoArea) {
+  const { area, priority } = parseIssueForm(body);
+  const urgent = priority === 'P0';
+  return {
+    area: area || repoArea || null,
+    priority,
+    status: urgent ? STATUS.todo : STATUS.backlog,
+    currentSprint: urgent,
+  };
+}
+
+function iterationEnd(iteration) {
+  return new Date(Date.parse(iteration.startDate) + iteration.duration * DAY_MS).toISOString().slice(0, 10);
+}
+
+function currentIteration(iterations, today) {
+  return iterations.find((it) => it.startDate <= today && today < iterationEnd(it)) || null;
+}
+
 async function loadProject(github, org, number) {
   const { organization } = await github.graphql(
     `query($org: String!, $number: Int!) {
@@ -49,6 +84,10 @@ async function loadProject(github, org, number) {
           fields(first: 50) {
             nodes {
               ... on ProjectV2SingleSelectField { id name options { id name } }
+              ... on ProjectV2IterationField {
+                id name
+                configuration { iterations { id title startDate duration } }
+              }
             }
           }
         }
@@ -89,35 +128,56 @@ async function addItem(github, projectId, contentId) {
   return addProjectV2ItemById.item.id;
 }
 
+async function setFieldValue(github, project, itemId, fieldId, value) {
+  await github.graphql(
+    `mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $value: ProjectV2FieldValue!) {
+      updateProjectV2ItemFieldValue(input: {
+        projectId: $projectId, itemId: $itemId, fieldId: $fieldId, value: $value
+      }) { projectV2Item { id } }
+    }`,
+    { projectId: project.id, itemId, fieldId, value },
+  );
+}
+
 async function setSingleSelect(github, project, itemId, fieldName, optionName, core) {
   const field = project.fields[fieldName];
-  const option = field && field.options.find((o) => o.name === optionName);
+  const option = field && field.options && field.options.find((o) => o.name === optionName);
   if (!option) {
     core.warning(`Project has no "${fieldName}" option named "${optionName}"`);
     return;
   }
-  await github.graphql(
-    `mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $optionId: String!) {
-      updateProjectV2ItemFieldValue(input: {
-        projectId: $projectId, itemId: $itemId, fieldId: $fieldId,
-        value: { singleSelectOptionId: $optionId }
-      }) { projectV2Item { id } }
-    }`,
-    { projectId: project.id, itemId, fieldId: field.id, optionId: option.id },
-  );
+  await setFieldValue(github, project, itemId, field.id, { singleSelectOptionId: option.id });
+}
+
+async function setIteration(github, project, itemId, fieldName, iterationId) {
+  await setFieldValue(github, project, itemId, project.fields[fieldName].id, { iterationId });
 }
 
 async function boardContent(github, context) {
   const payload = context.payload;
-  if (payload.issue && !payload.issue.pull_request) return { ids: [payload.issue.node_id], draft: false };
+  if (payload.issue && !payload.issue.pull_request) return { ids: [payload.issue.node_id], draft: false, linked: false };
 
   const prNumber = payload.pull_request?.number ?? payload.workflow_run?.pull_requests?.[0]?.number;
-  if (!prNumber) return { ids: [], draft: false };
+  if (!prNumber) return { ids: [], draft: false, linked: false };
 
   const { owner, repo } = context.repo;
   const pr = await pullRequestWithLinkedIssues(github, owner, repo, prNumber);
   const issues = pr.closingIssuesReferences.nodes.map((n) => n.id);
-  return { ids: issues.length ? issues : [pr.id], draft: pr.isDraft };
+  return { ids: issues.length ? issues : [pr.id], draft: pr.isDraft, linked: issues.length > 0 };
+}
+
+async function syncNewIssue({ github, context, core, project, area }) {
+  const fields = fieldsForNewIssue(context.payload.issue.body, area);
+  const itemId = await addItem(github, project.id, context.payload.issue.node_id);
+  await setSingleSelect(github, project, itemId, 'Status', fields.status, core);
+  if (fields.area) await setSingleSelect(github, project, itemId, 'Area', fields.area, core);
+  if (fields.priority) await setSingleSelect(github, project, itemId, 'Priority', fields.priority, core);
+  if (fields.currentSprint) {
+    const today = new Date().toISOString().slice(0, 10);
+    const sprint = currentIteration(project.fields.Sprint.configuration.iterations, today);
+    if (sprint) await setIteration(github, project, itemId, 'Sprint', sprint.id);
+  }
+  core.info(`${context.payload.issue.node_id} -> ${JSON.stringify(fields)}`);
 }
 
 async function run({ github, context, core, org, projectNumber, area }) {
@@ -128,15 +188,31 @@ async function run({ github, context, core, org, projectNumber, area }) {
   }
 
   const project = await loadProject(github, org, projectNumber);
-  const { ids, draft } = await boardContent(github, context);
+
+  if (context.eventName === 'issues' && context.payload.action === 'opened') {
+    await syncNewIssue({ github, context, core, project, area });
+    return;
+  }
+
+  const { ids, draft, linked } = await boardContent(github, context);
   if (status === STATUS.inReview && draft) status = STATUS.inProgress;
 
   for (const contentId of ids) {
     const itemId = await addItem(github, project.id, contentId);
     await setSingleSelect(github, project, itemId, 'Status', status, core);
-    if (area) await setSingleSelect(github, project, itemId, 'Area', area, core);
+    if (area && !linked) await setSingleSelect(github, project, itemId, 'Area', area, core);
     core.info(`${contentId} -> ${status}`);
   }
 }
 
-module.exports = { STATUS, targetStatus, run };
+module.exports = {
+  STATUS,
+  targetStatus,
+  parseIssueForm,
+  fieldsForNewIssue,
+  iterationEnd,
+  currentIteration,
+  loadProject,
+  setIteration,
+  run,
+};
