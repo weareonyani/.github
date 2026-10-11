@@ -66,7 +66,7 @@ test('run assigns sub-issue assignees to the parent and stops flagging it as una
   };
   const github = {
     graphql: async (q) => (q.includes('organization') ? project : items),
-    rest: { issues: { addAssignees: async (a) => added.push(a) } },
+    rest: { issues: { addAssignees: async (a) => { added.push(a); return { data: { assignees: [{ login: 'yokwejuste' }] } }; } } },
   };
   const issuesApi = { rest: { issues: {
     listForRepo: async () => ({ data: [] }),
@@ -77,4 +77,27 @@ test('run assigns sub-issue assignees to the parent and stops flagging it as una
   assert.deepEqual(added, [{ owner: 'weareonyani', repo: 'r_backend', issue_number: 39, assignees: ['yokwejuste'] }]);
   assert.match(published, /Parents assigned from sub-issues[\s\S]*Epic[\s\S]*yokwejuste/);
   assert.doesNotMatch(published, /missing assignee/);
+});
+
+test('run only reports assignees GitHub accepted (people without repo access are dropped)', async () => {
+  const { run } = require('./board-maintenance');
+  let published = '';
+  const project = { organization: { projectV2: { id: 'P', fields: { nodes: [{ id: 'S', name: 'Sprint', configuration: { iterations: [] } }] } } } };
+  const items = { node: { items: { pageInfo: { hasNextPage: false }, nodes: [{
+    id: 'I1',
+    content: {
+      __typename: 'Issue', title: 'Epic', url: 'u', state: 'OPEN', updatedAt: new Date().toISOString(), number: 41,
+      repository: { name: 'r_backend', owner: { login: 'weareonyani' } },
+      assignees: { totalCount: 1, nodes: [{ login: 'chestlyace' }] },
+      subIssues: { nodes: [{ assignees: { nodes: [{ login: 'outsider' }] } }] },
+    },
+    fieldValues: { nodes: [] },
+  }] } } };
+  const github = {
+    graphql: async (q) => (q.includes('organization') ? project : items),
+    rest: { issues: { addAssignees: async () => ({ data: { assignees: [{ login: 'chestlyace' }] } }) } },
+  };
+  const issuesApi = { rest: { issues: { listForRepo: async () => ({ data: [] }), create: async ({ body }) => { published = body; } } } };
+  await run({ github, issuesApi, context: { repo: { owner: 'weareonyani', repo: '.github' } }, core: { info: () => {} }, org: 'weareonyani', projectNumber: 1 });
+  assert.match(published, /Parents assigned from sub-issues\n\n_None_/);
 });

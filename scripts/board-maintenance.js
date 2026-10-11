@@ -139,9 +139,12 @@ async function run({ github, issuesApi, context, core, org, projectNumber }) {
 
   const parents = [];
   for (const item of open) {
-    const added = missingParentAssignees(item);
+    const wanted = missingParentAssignees(item);
+    if (!wanted.length) continue;
+    const { data } = await github.rest.issues.addAssignees({ owner: item.owner, repo: item.repo, issue_number: item.number, assignees: wanted });
+    const now = new Set(data.assignees.map((a) => a.login));
+    const added = wanted.filter((login) => now.has(login));
     if (!added.length) continue;
-    await github.rest.issues.addAssignees({ owner: item.owner, repo: item.repo, issue_number: item.number, assignees: added });
     item.assigneeLogins.push(...added);
     item.assignees += added.length;
     parents.push({ item, added });
