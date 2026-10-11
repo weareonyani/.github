@@ -1,0 +1,29 @@
+name: Board maintenance
+
+on:
+  schedule:
+    - cron: "0 5 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  maintain:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/github-script@v8
+        env:
+          ISSUES_TOKEN: ${{ github.token }}
+        with:
+          github-token: ${{ secrets.PROJECT_TOKEN }}
+          script: |
+            const maintenance = require(`${process.env.GITHUB_WORKSPACE}/scripts/board-maintenance.js`);
+            await maintenance.run({
+              github, context, core,
+              issuesApi: getOctokit(process.env.ISSUES_TOKEN),
+              org: context.repo.owner,
+              projectNumber: 1,
+            });
