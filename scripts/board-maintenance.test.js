@@ -34,3 +34,47 @@ test('stale: In Review or Blocked untouched for 3+ days', () => {
   assert.equal(isStale(item({ status: 'Blocked', updatedAt: '2026-10-22T00:00:00Z' }), now), false);
   assert.equal(isStale(item({ status: 'Todo', updatedAt: '2026-10-01T00:00:00Z' }), now), false);
 });
+
+const { missingParentAssignees } = require('./board-maintenance');
+
+test('parent issues gain every sub-issue assignee they lack, capped at 10', () => {
+  assert.deepEqual(missingParentAssignees({ isIssue: true, assigneeLogins: ['ann'], subIssueAssignees: ['bob', 'ann', 'cy', 'bob'] }), ['bob', 'cy']);
+  assert.deepEqual(missingParentAssignees({ isIssue: true, assigneeLogins: [], subIssueAssignees: [] }), []);
+  assert.deepEqual(missingParentAssignees({ isIssue: false, assigneeLogins: [], subIssueAssignees: ['bob'] }), []);
+  const many = Array.from({ length: 12 }, (_, i) => `u${i}`);
+  assert.equal(missingParentAssignees({ isIssue: true, assigneeLogins: ['ann', 'bob'], subIssueAssignees: many }).length, 8);
+});
+
+test('run assigns sub-issue assignees to the parent and stops flagging it as unassigned', async () => {
+  const { run } = require('./board-maintenance');
+  const added = [];
+  let published = '';
+  const project = {
+    organization: { projectV2: { id: 'P', fields: { nodes: [{ id: 'S', name: 'Sprint', configuration: { iterations: [] } }] } } },
+  };
+  const items = {
+    node: { items: { pageInfo: { hasNextPage: false }, nodes: [{
+      id: 'I1',
+      content: {
+        __typename: 'Issue', title: 'Epic', url: 'u', state: 'OPEN', updatedAt: new Date().toISOString(), number: 39,
+        repository: { name: 'r_backend', owner: { login: 'weareonyani' } },
+        assignees: { totalCount: 0, nodes: [] },
+        subIssues: { nodes: [{ assignees: { nodes: [{ login: 'yokwejuste' }] } }] },
+      },
+      fieldValues: { nodes: [{ name: 'Todo', field: { name: 'Status' } }] },
+    }] } },
+  };
+  const github = {
+    graphql: async (q) => (q.includes('organization') ? project : items),
+    rest: { issues: { addAssignees: async (a) => added.push(a) } },
+  };
+  const issuesApi = { rest: { issues: {
+    listForRepo: async () => ({ data: [] }),
+    create: async ({ body }) => { published = body; },
+  } } };
+  const core = { info: () => {} };
+  await run({ github, issuesApi, context: { repo: { owner: 'weareonyani', repo: '.github' } }, core, org: 'weareonyani', projectNumber: 1 });
+  assert.deepEqual(added, [{ owner: 'weareonyani', repo: 'r_backend', issue_number: 39, assignees: ['yokwejuste'] }]);
+  assert.match(published, /Parents assigned from sub-issues[\s\S]*Epic[\s\S]*yokwejuste/);
+  assert.doesNotMatch(published, /missing assignee/);
+});

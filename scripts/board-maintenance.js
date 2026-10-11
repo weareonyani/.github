@@ -4,6 +4,7 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 const STALE_DAYS = 3;
 const PLANNED = [STATUS.todo, STATUS.inProgress, STATUS.inReview, STATUS.blocked];
 const HEALTH_LABEL = 'board-health';
+const MAX_ASSIGNEES = 10;
 
 function needsRollover(item, currentSprintId, today) {
   if (!currentSprintId || !item.open || item.status === STATUS.done || !item.sprint) return false;
@@ -34,6 +35,12 @@ function normalize(node) {
     id: node.id,
     title: c.title,
     url: c.url,
+    isIssue: c.__typename === 'Issue',
+    owner: c.repository?.owner.login,
+    repo: c.repository?.name,
+    number: c.number,
+    assigneeLogins: c.assignees.nodes.map((a) => a.login),
+    subIssueAssignees: (c.subIssues?.nodes ?? []).flatMap((sub) => sub.assignees.nodes.map((a) => a.login)),
     open: c.state === 'OPEN',
     updatedAt: c.updatedAt,
     assignees: c.assignees.totalCount,
@@ -56,8 +63,14 @@ async function loadItems(github, projectId) {
               nodes {
                 id
                 content {
-                  ... on Issue { title url state updatedAt assignees(first: 1) { totalCount } }
-                  ... on PullRequest { title url state updatedAt assignees(first: 1) { totalCount } }
+                  __typename
+                  ... on Issue {
+                    title url state updatedAt number
+                    repository { name owner { login } }
+                    assignees(first: 10) { totalCount nodes { login } }
+                    subIssues(first: 50) { nodes { assignees(first: 10) { nodes { login } } } }
+                  }
+                  ... on PullRequest { title url state updatedAt assignees(first: 10) { totalCount nodes { login } } }
                 }
                 fieldValues(first: 20) {
                   nodes {
@@ -79,7 +92,7 @@ async function loadItems(github, projectId) {
   return items;
 }
 
-function healthReport({ rolled, gaps, stale, projectUrl }) {
+function healthReport({ rolled, gaps, stale, parents = [], projectUrl }) {
   const link = (i) => `[${i.title}](${i.url})`;
   const section = (title, rows) => `### ${title}\n\n${rows.length ? rows.join('\n') : '_None_'}`;
   return [
@@ -87,6 +100,7 @@ function healthReport({ rolled, gaps, stale, projectUrl }) {
     section('Planned items missing info', gaps.map(({ item, missing }) => `- [ ] ${link(item)} (${item.status}): missing ${missing.join(', ')}`)),
     section(`Stale (In Review / Blocked, no activity for ${STALE_DAYS}+ days)`, stale.map((i) => `- [ ] ${link(i)} (${i.status}, last update ${i.updatedAt.slice(0, 10)})`)),
     section('Rolled over to the current sprint', rolled.map((i) => `- ${link(i)}`)),
+    section('Parents assigned from sub-issues', parents.map(({ item, added }) => `- ${link(item)}: ${added.join(', ')}`)),
   ].join('\n\n');
 }
 
@@ -115,12 +129,23 @@ async function run({ github, issuesApi, context, core, org, projectNumber }) {
   }
 
   const open = items.filter((i) => i.open);
+
+  const parents = [];
+  for (const item of open) {
+    const added = missingParentAssignees(item);
+    if (!added.length) continue;
+    await github.rest.issues.addAssignees({ owner: item.owner, repo: item.repo, issue_number: item.number, assignees: added });
+    item.assigneeLogins.push(...added);
+    item.assignees += added.length;
+    parents.push({ item, added });
+  }
+
   const gaps = open.map((item) => ({ item, missing: planningGaps(item) })).filter((g) => g.missing.length);
   const stale = open.filter((i) => isStale(i, Date.now()));
 
   const projectUrl = `https://github.com/orgs/${org}/projects/${projectNumber}`;
-  await publishHealth(issuesApi, context.repo.owner, context.repo.repo, healthReport({ rolled, gaps, stale, projectUrl }));
-  core.info(`rolled=${rolled.length} gaps=${gaps.length} stale=${stale.length} sprint=${sprint?.title ?? 'none'}`);
+  await publishHealth(issuesApi, context.repo.owner, context.repo.repo, healthReport({ rolled, gaps, stale, parents, projectUrl }));
+  core.info(`rolled=${rolled.length} parents=${parents.length} gaps=${gaps.length} stale=${stale.length} sprint=${sprint?.title ?? 'none'}`);
 }
 
-module.exports = { needsRollover, planningGaps, isStale, run };
+module.exports = { needsRollover, planningGaps, isStale, missingParentAssignees, run };
