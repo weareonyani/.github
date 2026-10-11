@@ -1,0 +1,46 @@
+name: Feature request
+description: Propose a new feature or an improvement
+title: "[Feature]: "
+labels: ["type:feature", "status:triage"]
+projects: ["weareonyani/1"]
+body:
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      multiple: true
+      options:
+        - Backend
+        - Frontend
+        - Mobile
+        - Website
+        - Shortlinks
+        - Infra / DevOps
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: Who is this for and what problem does it solve?
+    validations:
+      required: true
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed solution
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      placeholder: |
+        - [ ] ...
+        - [ ] ...
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered

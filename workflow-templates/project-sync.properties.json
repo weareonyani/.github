@@ -1,0 +1,5 @@
+{
+  "name": "Reckot project sync",
+  "description": "Moves issues on the Reckot board from PR and CI events.",
+  "categories": ["Automation"]
+}

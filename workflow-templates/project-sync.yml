@@ -1,0 +1,19 @@
+name: Project sync
+
+on:
+  issues:
+    types: [opened, reopened, closed, transferred]
+  pull_request:
+    types: [opened, reopened, ready_for_review, converted_to_draft, edited, closed]
+  pull_request_review:
+    types: [submitted]
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+
+jobs:
+  sync:
+    uses: weareonyani/.github/.github/workflows/project-sync.yml@main
+    with:
+      area: Backend
+    secrets: inherit

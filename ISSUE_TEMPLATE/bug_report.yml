@@ -1,0 +1,66 @@
+name: Bug report
+description: Something is broken or behaves unexpectedly
+title: "[Bug]: "
+labels: ["type:bug", "status:triage"]
+projects: ["weareonyani/1"]
+body:
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Backend
+        - Frontend
+        - Mobile
+        - Website
+        - Shortlinks
+        - Infra / DevOps
+    validations:
+      required: true
+  - type: dropdown
+    id: severity
+    attributes:
+      label: Severity
+      options:
+        - P0 - Production down / data loss
+        - P1 - Major feature broken, no workaround
+        - P2 - Broken with a workaround
+        - P3 - Minor / cosmetic
+    validations:
+      required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What you saw, and what you expected instead.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Go to ...
+        2. Click ...
+        3. See error
+    validations:
+      required: true
+  - type: dropdown
+    id: environment
+    attributes:
+      label: Environment
+      options:
+        - Production
+        - Staging
+        - Local
+    validations:
+      required: true
+  - type: input
+    id: url
+    attributes:
+      label: URL / screen / endpoint
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs, screenshots, Sentry link
+      render: shell

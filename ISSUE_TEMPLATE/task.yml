@@ -1,0 +1,34 @@
+name: Task
+description: Technical task, chore, refactor or tech debt
+title: "[Task]: "
+labels: ["type:task", "status:triage"]
+projects: ["weareonyani/1"]
+body:
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      multiple: true
+      options:
+        - Backend
+        - Frontend
+        - Mobile
+        - Website
+        - Shortlinks
+        - Infra / DevOps
+    validations:
+      required: true
+  - type: textarea
+    id: description
+    attributes:
+      label: What needs to be done?
+    validations:
+      required: true
+  - type: textarea
+    id: done
+    attributes:
+      label: Definition of done
+      placeholder: |
+        - [ ] ...
+    validations:
+      required: true
