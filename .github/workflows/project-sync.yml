@@ -1,0 +1,36 @@
+name: Project sync
+
+on:
+  workflow_call:
+    inputs:
+      area:
+        description: Value for the board's Area field
+        type: string
+        required: false
+      project-number:
+        type: number
+        default: 1
+    secrets:
+      PROJECT_TOKEN:
+        required: true
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: weareonyani/.github
+          path: .org-github
+          sparse-checkout: scripts
+      - uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.PROJECT_TOKEN }}
+          script: |
+            const sync = require(`${process.env.GITHUB_WORKSPACE}/.org-github/scripts/project-sync.js`);
+            await sync.run({
+              github, context, core,
+              org: context.repo.owner,
+              projectNumber: ${{ inputs.project-number }},
+              area: '${{ inputs.area }}',
+            });
