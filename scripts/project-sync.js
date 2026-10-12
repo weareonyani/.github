@@ -174,6 +174,49 @@ async function boardCards(github, context) {
   return { cards: cardsForPullRequest(pr), draft: pr.isDraft };
 }
 
+const CLOSING_REF = /\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s*:?\s+(?:([\w.-]+)\/([\w.-]+))?#(\d+)\b/gi;
+
+function closingReferences(body, owner, repo) {
+  const refs = new Map();
+  for (const m of (body || '').matchAll(CLOSING_REF)) {
+    const ref = { owner: m[1] || owner, repo: m[2] || repo, number: Number(m[3]) };
+    refs.set(`${ref.owner}/${ref.repo}#${ref.number}`, ref);
+  }
+  return [...refs.values()];
+}
+
+function closesOnMerge(eventName, payload) {
+  const pr = payload.pull_request;
+  return (
+    eventName === 'pull_request' &&
+    payload.action === 'closed' &&
+    Boolean(pr?.merged) &&
+    pr.base.ref !== payload.repository?.default_branch
+  );
+}
+
+async function closeLinkedIssues({ github, context, core }) {
+  const pull = context.payload.pull_request;
+  const { owner, repo } = context.repo;
+  for (const ref of closingReferences(pull.body, owner, repo)) {
+    const label = `${ref.owner}/${ref.repo}#${ref.number}`;
+    try {
+      const { data: issue } = await github.rest.issues.get({ owner: ref.owner, repo: ref.repo, issue_number: ref.number });
+      if (issue.pull_request || issue.state === 'closed') continue;
+      await github.rest.issues.createComment({
+        owner: ref.owner, repo: ref.repo, issue_number: ref.number,
+        body: `Closed by ${owner}/${repo}#${pull.number}, merged into \`${pull.base.ref}\`. GitHub only auto-closes issues for merges into the default branch.`,
+      });
+      await github.rest.issues.update({
+        owner: ref.owner, repo: ref.repo, issue_number: ref.number, state: 'closed', state_reason: 'completed',
+      });
+      core.info(`${label} closed`);
+    } catch (error) {
+      core.warning(`Could not close ${label}: ${error.message}`);
+    }
+  }
+}
+
 async function syncNewIssue({ github, context, core, project, area }) {
   const fields = fieldsForNewIssue(context.payload.issue.body, area);
   const itemId = await addItem(github, project.id, context.payload.issue.node_id);
@@ -211,6 +254,10 @@ async function run({ github, context, core, org, projectNumber, area }) {
     if (area && setArea) await setSingleSelect(github, project, itemId, 'Area', area, core);
     core.info(`${contentId} -> ${status}`);
   }
+
+  if (closesOnMerge(context.eventName, context.payload)) {
+    await closeLinkedIssues({ github, context, core });
+  }
 }
 
 module.exports = {
@@ -224,4 +271,7 @@ module.exports = {
   loadProject,
   setIteration,
   run,
+  closingReferences,
+  closesOnMerge,
+  closeLinkedIssues,
 };
