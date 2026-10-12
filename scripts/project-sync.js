@@ -109,6 +109,7 @@ async function pullRequestWithLinkedIssues(github, owner, repo, number) {
         pullRequest(number: $number) {
           id
           isDraft
+          state
           closingIssuesReferences(first: 20) { nodes { id } }
         }
       }
@@ -160,18 +161,22 @@ function cardsForPullRequest(pr) {
   ];
 }
 
+function ciResultIsStale(eventName, prState) {
+  return eventName === 'workflow_run' && prState !== 'OPEN';
+}
+
 async function boardCards(github, context) {
   const payload = context.payload;
   if (payload.issue && !payload.issue.pull_request) {
-    return { cards: [{ contentId: payload.issue.node_id, setArea: false }], draft: false };
+    return { cards: [{ contentId: payload.issue.node_id, setArea: false }], draft: false, state: null };
   }
 
   const prNumber = payload.pull_request?.number ?? payload.workflow_run?.pull_requests?.[0]?.number;
-  if (!prNumber) return { cards: [], draft: false };
+  if (!prNumber) return { cards: [], draft: false, state: null };
 
   const { owner, repo } = context.repo;
   const pr = await pullRequestWithLinkedIssues(github, owner, repo, prNumber);
-  return { cards: cardsForPullRequest(pr), draft: pr.isDraft };
+  return { cards: cardsForPullRequest(pr), draft: pr.isDraft, state: pr.state };
 }
 
 const CLOSING_REF = /\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s*:?\s+(?:([\w.-]+)\/([\w.-]+))?#(\d+)\b/gi;
@@ -245,7 +250,11 @@ async function run({ github, context, core, org, projectNumber, area }) {
     return;
   }
 
-  const { cards, draft } = await boardCards(github, context);
+  const { cards, draft, state } = await boardCards(github, context);
+  if (ciResultIsStale(context.eventName, state)) {
+    core.info(`Ignoring CI result for a ${state} pull request`);
+    return;
+  }
   if (status === STATUS.inReview && draft) status = STATUS.inProgress;
 
   for (const { contentId, setArea } of cards) {
@@ -263,6 +272,7 @@ async function run({ github, context, core, org, projectNumber, area }) {
 module.exports = {
   STATUS,
   targetStatus,
+  ciResultIsStale,
   parseIssueForm,
   fieldsForNewIssue,
   cardsForPullRequest,

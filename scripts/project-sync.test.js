@@ -37,6 +37,14 @@ test('CI runs', () => {
   assert.equal(targetStatus('workflow_run', run('failure', 'push')), null);
 });
 
+test('CI results that land after a PR is merged or closed leave the card alone', () => {
+  const { ciResultIsStale } = require('./project-sync');
+  assert.equal(ciResultIsStale('workflow_run', 'MERGED'), true);
+  assert.equal(ciResultIsStale('workflow_run', 'CLOSED'), true);
+  assert.equal(ciResultIsStale('workflow_run', 'OPEN'), false);
+  assert.equal(ciResultIsStale('pull_request', 'MERGED'), false);
+});
+
 const { parseIssueForm, fieldsForNewIssue, currentIteration } = require('./project-sync');
 
 test('parses issue form answers', () => {
