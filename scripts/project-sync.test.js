@@ -76,3 +76,68 @@ test('PR and its linked issues all get cards; only the PR card takes the repo Ar
     { contentId: 'PR2', setArea: true },
   ]);
 });
+
+const { closingReferences, closesOnMerge, closeLinkedIssues } = require('./project-sync');
+
+test('closing references in a PR body', () => {
+  const body = 'Closes #42\nFixes weareonyani/r_frontend#41 and resolves: #7.\nRefs #9, closing #10 later, fixed #3';
+  assert.deepEqual(closingReferences(body, 'weareonyani', 'r_backend'), [
+    { owner: 'weareonyani', repo: 'r_backend', number: 42 },
+    { owner: 'weareonyani', repo: 'r_frontend', number: 41 },
+    { owner: 'weareonyani', repo: 'r_backend', number: 7 },
+    { owner: 'weareonyani', repo: 'r_backend', number: 3 },
+  ]);
+  assert.deepEqual(closingReferences('Closes #5 and closes #5', 'o', 'r'), [{ owner: 'o', repo: 'r', number: 5 }]);
+  assert.deepEqual(closingReferences(null, 'o', 'r'), []);
+});
+
+test('only merges into a non-default branch close issues', () => {
+  const event = (merged, base) => ({
+    action: 'closed',
+    pull_request: { merged, base: { ref: base } },
+    repository: { default_branch: 'main' },
+  });
+  assert.equal(closesOnMerge('pull_request', event(true, 'staging')), true);
+  assert.equal(closesOnMerge('pull_request', event(true, 'main')), false);
+  assert.equal(closesOnMerge('pull_request', event(false, 'staging')), false);
+  assert.equal(closesOnMerge('issues', event(true, 'staging')), false);
+});
+
+test('closeLinkedIssues closes open issues and skips PRs, closed issues and failures', async () => {
+  const calls = { updates: [], comments: [] };
+  const issues = {
+    42: { state: 'open' },
+    43: { state: 'closed' },
+    44: { state: 'open', pull_request: {} },
+    45: { state: 'open' },
+  };
+  const github = {
+    rest: {
+      issues: {
+        get: async ({ issue_number }) => {
+          if (issue_number === 99) throw new Error('Not Found');
+          return { data: issues[issue_number] };
+        },
+        update: async (args) => calls.updates.push(args),
+        createComment: async (args) => calls.comments.push(args),
+      },
+    },
+  };
+  const warnings = [];
+  const core = { info: () => {}, warning: (m) => warnings.push(m) };
+  const context = {
+    repo: { owner: 'o', repo: 'r' },
+    payload: { pull_request: { number: 7, body: 'Closes #42, closes #43, fixes #44, resolves #99, fixes o/x#45', base: { ref: 'staging' } } },
+  };
+
+  await closeLinkedIssues({ github, context, core });
+
+  assert.deepEqual(
+    calls.updates.map((u) => `${u.repo}#${u.issue_number}:${u.state}:${u.state_reason}`),
+    ['r#42:closed:completed', 'x#45:closed:completed'],
+  );
+  assert.equal(calls.comments.length, 2);
+  assert.match(calls.comments[0].body, /o\/r#7/);
+  assert.match(calls.comments[0].body, /staging/);
+  assert.equal(warnings.length, 1);
+});
