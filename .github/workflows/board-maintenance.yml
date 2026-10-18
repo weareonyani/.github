@@ -11,7 +11,7 @@ permissions:
 
 jobs:
   maintain:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, coolify]
     steps:
       - uses: actions/checkout@v5
       - uses: actions/github-script@v8
