@@ -154,21 +154,29 @@ async function setIteration(github, project, itemId, fieldName, iterationId) {
   await setFieldValue(github, project, itemId, project.fields[fieldName].id, { iterationId });
 }
 
-function cardsForPullRequest(pr) {
-  return [
-    ...pr.closingIssuesReferences.nodes.map((n) => ({ contentId: n.id, setArea: false })),
-    { contentId: pr.id, setArea: true },
-  ];
+async function hasSprint(github, itemId) {
+  const { node } = await github.graphql(
+    `query($itemId: ID!) {
+      node(id: $itemId) { ... on ProjectV2Item { fieldValueByName(name: "Sprint") { __typename } } }
+    }`,
+    { itemId },
+  );
+  return Boolean(node.fieldValueByName);
 }
 
-function ciResultIsStale(eventName, prState) {
-  return eventName === 'workflow_run' && prState !== 'OPEN';
+function cardsForPullRequest(pr) {
+  return pr.closingIssuesReferences.nodes.map((n) => n.id);
+}
+
+function pullRequestEventIsStale(eventName, action, prState) {
+  if (!prState || prState === 'OPEN') return false;
+  return !(eventName === 'pull_request' && action === 'closed');
 }
 
 async function boardCards(github, context) {
   const payload = context.payload;
   if (payload.issue && !payload.issue.pull_request) {
-    return { cards: [{ contentId: payload.issue.node_id, setArea: false }], draft: false, state: null };
+    return { cards: [payload.issue.node_id], draft: false, state: null };
   }
 
   const prNumber = payload.pull_request?.number ?? payload.workflow_run?.pull_requests?.[0]?.number;
@@ -251,16 +259,22 @@ async function run({ github, context, core, org, projectNumber, area }) {
   }
 
   const { cards, draft, state } = await boardCards(github, context);
-  if (ciResultIsStale(context.eventName, state)) {
-    core.info(`Ignoring CI result for a ${state} pull request`);
+  if (pullRequestEventIsStale(context.eventName, context.payload.action, state)) {
+    core.info(`Ignoring ${context.eventName}.${context.payload.action} for a ${state} pull request`);
     return;
   }
   if (status === STATUS.inReview && draft) status = STATUS.inProgress;
 
-  for (const { contentId, setArea } of cards) {
+  const today = new Date().toISOString().slice(0, 10);
+  const sprint = currentIteration(project.fields.Sprint.configuration.iterations, today);
+  const fromPullRequest = context.eventName !== 'issues';
+
+  for (const contentId of cards) {
     const itemId = await addItem(github, project.id, contentId);
     await setSingleSelect(github, project, itemId, 'Status', status, core);
-    if (area && setArea) await setSingleSelect(github, project, itemId, 'Area', area, core);
+    if (fromPullRequest && sprint && !(await hasSprint(github, itemId))) {
+      await setIteration(github, project, itemId, 'Sprint', sprint.id);
+    }
     core.info(`${contentId} -> ${status}`);
   }
 
@@ -272,7 +286,7 @@ async function run({ github, context, core, org, projectNumber, area }) {
 module.exports = {
   STATUS,
   targetStatus,
-  ciResultIsStale,
+  pullRequestEventIsStale,
   parseIssueForm,
   fieldsForNewIssue,
   cardsForPullRequest,

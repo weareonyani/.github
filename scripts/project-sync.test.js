@@ -37,12 +37,15 @@ test('CI runs', () => {
   assert.equal(targetStatus('workflow_run', run('failure', 'push')), null);
 });
 
-test('CI results that land after a PR is merged or closed leave the card alone', () => {
-  const { ciResultIsStale } = require('./project-sync');
-  assert.equal(ciResultIsStale('workflow_run', 'MERGED'), true);
-  assert.equal(ciResultIsStale('workflow_run', 'CLOSED'), true);
-  assert.equal(ciResultIsStale('workflow_run', 'OPEN'), false);
-  assert.equal(ciResultIsStale('pull_request', 'MERGED'), false);
+test('events for a merged or closed PR leave the card alone, except the merge itself', () => {
+  const { pullRequestEventIsStale } = require('./project-sync');
+  assert.equal(pullRequestEventIsStale('workflow_run', 'completed', 'MERGED'), true);
+  assert.equal(pullRequestEventIsStale('workflow_run', 'completed', 'CLOSED'), true);
+  assert.equal(pullRequestEventIsStale('workflow_run', 'completed', 'OPEN'), false);
+  assert.equal(pullRequestEventIsStale('pull_request', 'edited', 'MERGED'), true);
+  assert.equal(pullRequestEventIsStale('pull_request_review', 'submitted', 'CLOSED'), true);
+  assert.equal(pullRequestEventIsStale('pull_request', 'closed', 'MERGED'), false);
+  assert.equal(pullRequestEventIsStale('issues', 'closed', null), false);
 });
 
 const { parseIssueForm, fieldsForNewIssue, currentIteration } = require('./project-sync');
@@ -73,16 +76,10 @@ test('current iteration', () => {
 
 const { cardsForPullRequest } = require('./project-sync');
 
-test('PR and its linked issues all get cards; only the PR card takes the repo Area', () => {
+test('only the issues a PR closes get cards, never the PR itself', () => {
   const pr = { id: 'PR1', closingIssuesReferences: { nodes: [{ id: 'I1' }, { id: 'I2' }] } };
-  assert.deepEqual(cardsForPullRequest(pr), [
-    { contentId: 'I1', setArea: false },
-    { contentId: 'I2', setArea: false },
-    { contentId: 'PR1', setArea: true },
-  ]);
-  assert.deepEqual(cardsForPullRequest({ id: 'PR2', closingIssuesReferences: { nodes: [] } }), [
-    { contentId: 'PR2', setArea: true },
-  ]);
+  assert.deepEqual(cardsForPullRequest(pr), ['I1', 'I2']);
+  assert.deepEqual(cardsForPullRequest({ id: 'PR2', closingIssuesReferences: { nodes: [] } }), []);
 });
 
 const { closingReferences, closesOnMerge, closeLinkedIssues } = require('./project-sync');
