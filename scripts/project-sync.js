@@ -109,6 +109,7 @@ async function pullRequestWithLinkedIssues(github, owner, repo, number) {
         pullRequest(number: $number) {
           id
           isDraft
+          state
           closingIssuesReferences(first: 20) { nodes { id } }
         }
       }
@@ -153,25 +154,37 @@ async function setIteration(github, project, itemId, fieldName, iterationId) {
   await setFieldValue(github, project, itemId, project.fields[fieldName].id, { iterationId });
 }
 
+async function hasSprint(github, itemId) {
+  const { node } = await github.graphql(
+    `query($itemId: ID!) {
+      node(id: $itemId) { ... on ProjectV2Item { fieldValueByName(name: "Sprint") { __typename } } }
+    }`,
+    { itemId },
+  );
+  return Boolean(node.fieldValueByName);
+}
+
 function cardsForPullRequest(pr) {
-  return [
-    ...pr.closingIssuesReferences.nodes.map((n) => ({ contentId: n.id, setArea: false })),
-    { contentId: pr.id, setArea: true },
-  ];
+  return pr.closingIssuesReferences.nodes.map((n) => n.id);
+}
+
+function pullRequestEventIsStale(eventName, action, prState) {
+  if (!prState || prState === 'OPEN') return false;
+  return !(eventName === 'pull_request' && action === 'closed');
 }
 
 async function boardCards(github, context) {
   const payload = context.payload;
   if (payload.issue && !payload.issue.pull_request) {
-    return { cards: [{ contentId: payload.issue.node_id, setArea: false }], draft: false };
+    return { cards: [payload.issue.node_id], draft: false, state: null };
   }
 
   const prNumber = payload.pull_request?.number ?? payload.workflow_run?.pull_requests?.[0]?.number;
-  if (!prNumber) return { cards: [], draft: false };
+  if (!prNumber) return { cards: [], draft: false, state: null };
 
   const { owner, repo } = context.repo;
   const pr = await pullRequestWithLinkedIssues(github, owner, repo, prNumber);
-  return { cards: cardsForPullRequest(pr), draft: pr.isDraft };
+  return { cards: cardsForPullRequest(pr), draft: pr.isDraft, state: pr.state };
 }
 
 const CLOSING_REF = /\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s*:?\s+(?:([\w.-]+)\/([\w.-]+))?#(\d+)\b/gi;
@@ -245,13 +258,23 @@ async function run({ github, context, core, org, projectNumber, area }) {
     return;
   }
 
-  const { cards, draft } = await boardCards(github, context);
+  const { cards, draft, state } = await boardCards(github, context);
+  if (pullRequestEventIsStale(context.eventName, context.payload.action, state)) {
+    core.info(`Ignoring ${context.eventName}.${context.payload.action} for a ${state} pull request`);
+    return;
+  }
   if (status === STATUS.inReview && draft) status = STATUS.inProgress;
 
-  for (const { contentId, setArea } of cards) {
+  const today = new Date().toISOString().slice(0, 10);
+  const sprint = currentIteration(project.fields.Sprint.configuration.iterations, today);
+  const fromPullRequest = context.eventName !== 'issues';
+
+  for (const contentId of cards) {
     const itemId = await addItem(github, project.id, contentId);
     await setSingleSelect(github, project, itemId, 'Status', status, core);
-    if (area && setArea) await setSingleSelect(github, project, itemId, 'Area', area, core);
+    if (fromPullRequest && sprint && !(await hasSprint(github, itemId))) {
+      await setIteration(github, project, itemId, 'Sprint', sprint.id);
+    }
     core.info(`${contentId} -> ${status}`);
   }
 
@@ -263,6 +286,7 @@ async function run({ github, context, core, org, projectNumber, area }) {
 module.exports = {
   STATUS,
   targetStatus,
+  pullRequestEventIsStale,
   parseIssueForm,
   fieldsForNewIssue,
   cardsForPullRequest,
