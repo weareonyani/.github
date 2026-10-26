@@ -16,7 +16,7 @@ on:
 
 jobs:
   sync:
-    runs-on: [self-hosted, reckot]
+    runs-on: [self-hosted, reckot, sync]
     steps:
       - uses: actions/checkout@v5
         with:
