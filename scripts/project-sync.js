@@ -8,6 +8,8 @@ const STATUS = {
 };
 
 const DAY_MS = 24 * 60 * 60 * 1000;
+const RECONCILE_WINDOW_MS = 15 * 60 * 1000;
+const SCHEDULED_EVENTS = ['schedule', 'workflow_dispatch'];
 
 function targetStatus(eventName, payload) {
   const action = payload.action;
@@ -230,6 +232,80 @@ async function closeLinkedIssues({ github, context, core }) {
   }
 }
 
+function statusForOpenPullRequest(pr) {
+  if (pr.isDraft || pr.reviewDecision === 'CHANGES_REQUESTED') return STATUS.inProgress;
+  const checks = pr.commits.nodes[0]?.commit.statusCheckRollup?.state;
+  if (['FAILURE', 'ERROR'].includes(checks)) return STATUS.blocked;
+  return STATUS.inReview;
+}
+
+async function mergedPullRequests(github, owner, repo, sha, branch) {
+  const { data } = await github.rest.repos.listPullRequestsAssociatedWithCommit({ owner, repo, commit_sha: sha });
+  return data.filter((pr) => pr.merged_at && pr.base.ref === branch);
+}
+
+async function recentlyUpdatedPullRequests(github, owner, repo, since) {
+  const { repository } = await github.graphql(
+    `query($owner: String!, $repo: String!) {
+      repository(owner: $owner, name: $repo) {
+        pullRequests(states: OPEN, first: 50, orderBy: { field: UPDATED_AT, direction: DESC }) {
+          nodes {
+            number
+            updatedAt
+            isDraft
+            reviewDecision
+            commits(last: 1) { nodes { commit { statusCheckRollup { state } } } }
+            closingIssuesReferences(first: 20) { nodes { id } }
+          }
+        }
+      }
+    }`,
+    { owner, repo },
+  );
+  return repository.pullRequests.nodes.filter((pr) => pr.updatedAt >= since);
+}
+
+function sprintForToday(project) {
+  const today = new Date().toISOString().slice(0, 10);
+  return currentIteration(project.fields.Sprint.configuration.iterations, today);
+}
+
+async function moveCards({ github, core, project, cards, status, sprint }) {
+  for (const contentId of cards) {
+    const itemId = await addItem(github, project.id, contentId);
+    await setSingleSelect(github, project, itemId, 'Status', status, core);
+    if (sprint && !(await hasSprint(github, itemId))) {
+      await setIteration(github, project, itemId, 'Sprint', sprint.id);
+    }
+    core.info(`${contentId} -> ${status}`);
+  }
+}
+
+async function syncMergedPullRequests({ github, context, core, project }) {
+  const branch = context.payload.ref.replace('refs/heads/', '');
+  const { owner, repo } = context.repo;
+  const sprint = sprintForToday(project);
+  for (const pull of await mergedPullRequests(github, owner, repo, context.payload.after, branch)) {
+    const pr = await pullRequestWithLinkedIssues(github, owner, repo, pull.number);
+    await moveCards({ github, core, project, cards: cardsForPullRequest(pr), status: STATUS.done, sprint });
+    if (branch !== context.payload.repository.default_branch) {
+      await closeLinkedIssues({ github, context: { ...context, payload: { pull_request: pull } }, core });
+    }
+  }
+}
+
+async function reconcileOpenPullRequests({ github, context, core, project }) {
+  const { owner, repo } = context.repo;
+  const since = new Date(Date.now() - RECONCILE_WINDOW_MS).toISOString();
+  const sprint = sprintForToday(project);
+  for (const pr of await recentlyUpdatedPullRequests(github, owner, repo, since)) {
+    const cards = cardsForPullRequest(pr);
+    if (cards.length) {
+      await moveCards({ github, core, project, cards, status: statusForOpenPullRequest(pr), sprint });
+    }
+  }
+}
+
 async function syncNewIssue({ github, context, core, project, area }) {
   const fields = fieldsForNewIssue(context.payload.issue.body, area);
   const itemId = await addItem(github, project.id, context.payload.issue.node_id);
@@ -245,6 +321,13 @@ async function syncNewIssue({ github, context, core, project, area }) {
 }
 
 async function run({ github, context, core, org, projectNumber, area }) {
+  if (context.eventName === 'push' || SCHEDULED_EVENTS.includes(context.eventName)) {
+    const project = await loadProject(github, org, projectNumber);
+    const sync = context.eventName === 'push' ? syncMergedPullRequests : reconcileOpenPullRequests;
+    await sync({ github, context, core, project });
+    return;
+  }
+
   let status = targetStatus(context.eventName, context.payload);
   if (!status) {
     core.info(`No board change for ${context.eventName}.${context.payload.action}`);
@@ -265,18 +348,8 @@ async function run({ github, context, core, org, projectNumber, area }) {
   }
   if (status === STATUS.inReview && draft) status = STATUS.inProgress;
 
-  const today = new Date().toISOString().slice(0, 10);
-  const sprint = currentIteration(project.fields.Sprint.configuration.iterations, today);
-  const fromPullRequest = context.eventName !== 'issues';
-
-  for (const contentId of cards) {
-    const itemId = await addItem(github, project.id, contentId);
-    await setSingleSelect(github, project, itemId, 'Status', status, core);
-    if (fromPullRequest && sprint && !(await hasSprint(github, itemId))) {
-      await setIteration(github, project, itemId, 'Sprint', sprint.id);
-    }
-    core.info(`${contentId} -> ${status}`);
-  }
+  const sprint = context.eventName !== 'issues' ? sprintForToday(project) : null;
+  await moveCards({ github, core, project, cards, status, sprint });
 
   if (closesOnMerge(context.eventName, context.payload)) {
     await closeLinkedIssues({ github, context, core });
@@ -298,4 +371,8 @@ module.exports = {
   closingReferences,
   closesOnMerge,
   closeLinkedIssues,
+  statusForOpenPullRequest,
+  mergedPullRequests,
+  syncMergedPullRequests,
+  reconcileOpenPullRequests,
 };
