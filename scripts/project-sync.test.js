@@ -169,6 +169,8 @@ test('open pull request status', () => {
   assert.equal(statusForOpenPullRequest(openPr({ reviewDecision: 'CHANGES_REQUESTED' })), STATUS.inProgress);
 });
 
+const RELEASE_BRANCH = 'staging';
+
 function fakeBoard({ pullRequests = [], associated = [], statuses = {}, stillOpen = [] } = {}) {
   const moves = [];
   const closes = [];
@@ -183,7 +185,9 @@ function fakeBoard({ pullRequests = [], associated = [], statuses = {}, stillOpe
     },
     graphql: async (query, vars) => {
       if (query.includes('closedByPullRequestsReferences')) {
-        return { node: { closedByPullRequestsReferences: { totalCount: stillOpen.includes(vars.issueId) ? 1 : 0 } } };
+        const nodes = [{ headRefName: RELEASE_BRANCH }];
+        if (stillOpen.includes(vars.issueId)) nodes.push({ headRefName: 'feat/next' });
+        return { node: { closedByPullRequestsReferences: { nodes } } };
       }
       if (query.includes('pullRequests(states: OPEN')) return { repository: { pullRequests: { nodes: pullRequests } } };
       if (query.includes('pullRequest(number:')) {
@@ -295,4 +299,25 @@ test('the scheduled pass leaves cards blocked by failing CI for the CI result to
   await reconcileOpenPullRequests({ ...board, context: { repo: { owner: 'o', repo: 'r' }, payload: {} } });
 
   assert.deepEqual(board.moves, ['ITEM_ISSUE_B:In Review', 'ITEM_ISSUE_C:In Progress']);
+});
+
+const { cardsInFlight } = require('./project-sync');
+
+test('open PRs never pull closed issues back, and release PRs move no cards', () => {
+  const refs = { nodes: [{ id: 'OPEN', closed: false }, { id: 'SHIPPED', closed: true }] };
+  assert.deepEqual(cardsInFlight({ headRefName: 'feat/x', closingIssuesReferences: refs }), ['OPEN']);
+  assert.deepEqual(cardsInFlight({ headRefName: 'staging', closingIssuesReferences: refs }), []);
+});
+
+test('the scheduled pass skips closed issues and release PRs', async () => {
+  const board = fakeBoard({
+    pullRequests: [
+      openPr({ number: 1, isDraft: true, closingIssuesReferences: { nodes: [{ id: 'ISSUE_A', closed: true }, { id: 'ISSUE_B', closed: false }] } }),
+      openPr({ number: 2, isDraft: true, headRefName: 'staging', closingIssuesReferences: { nodes: [{ id: 'ISSUE_C', closed: false }] } }),
+    ],
+  });
+
+  await reconcileOpenPullRequests({ ...board, context: { repo: { owner: 'o', repo: 'r' }, payload: {} } });
+
+  assert.deepEqual(board.moves, ['ITEM_ISSUE_B:In Progress']);
 });
