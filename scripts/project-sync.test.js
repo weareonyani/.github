@@ -217,12 +217,14 @@ test('a push moves the cards of PRs merged into that branch to Done and closes i
       { number: 7, merged_at: '2026-10-27T00:00:00Z', base: { ref: 'main' }, body: 'Closes #70' },
     ],
   });
-  const context = {
-    repo: { owner: 'o', repo: 'r' },
-    payload: { ref: 'refs/heads/staging', after: 'abc', repository: { default_branch: 'main' } },
-  };
+  class ActionsContext {
+    payload = { ref: 'refs/heads/staging', after: 'abc', repository: { default_branch: 'main' } };
+    get repo() {
+      return { owner: 'o', repo: 'r' };
+    }
+  }
 
-  await syncMergedPullRequests({ ...board, context });
+  await syncMergedPullRequests({ ...board, context: new ActionsContext() });
 
   assert.deepEqual(board.moves, ['ITEM_ISSUE_5:Done']);
   assert.deepEqual(board.closes, ['r#50']);
