@@ -289,7 +289,7 @@ async function syncMergedPullRequests({ github, context, core, project }) {
     const pr = await pullRequestWithLinkedIssues(github, owner, repo, pull.number);
     await moveCards({ github, core, project, cards: cardsForPullRequest(pr), status: STATUS.done, sprint });
     if (branch !== context.payload.repository.default_branch) {
-      await closeLinkedIssues({ github, context: { ...context, payload: { pull_request: pull } }, core });
+      await closeLinkedIssues({ github, context: { repo: { owner, repo }, payload: { pull_request: pull } }, core });
     }
   }
 }
