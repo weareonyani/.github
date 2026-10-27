@@ -158,7 +158,6 @@ const openPr = (overrides = {}) => ({
   updatedAt: new Date().toISOString(),
   isDraft: false,
   reviewDecision: null,
-  commits: { nodes: [{ commit: { statusCheckRollup: { state: 'SUCCESS' } } }] },
   closingIssuesReferences: { nodes: [{ id: 'ISSUE_1' }] },
   ...overrides,
 });
@@ -167,13 +166,9 @@ test('open pull request status', () => {
   assert.equal(statusForOpenPullRequest(openPr()), STATUS.inReview);
   assert.equal(statusForOpenPullRequest(openPr({ isDraft: true })), STATUS.inProgress);
   assert.equal(statusForOpenPullRequest(openPr({ reviewDecision: 'CHANGES_REQUESTED' })), STATUS.inProgress);
-  const failing = openPr({ commits: { nodes: [{ commit: { statusCheckRollup: { state: 'FAILURE' } } }] } });
-  assert.equal(statusForOpenPullRequest(failing), STATUS.blocked);
-  const pending = openPr({ commits: { nodes: [{ commit: { statusCheckRollup: null } }] } });
-  assert.equal(statusForOpenPullRequest(pending), STATUS.inReview);
 });
 
-function fakeBoard({ pullRequests = [], associated = [] } = {}) {
+function fakeBoard({ pullRequests = [], associated = [], statuses = {} } = {}) {
   const moves = [];
   const closes = [];
   const github = {
@@ -191,6 +186,10 @@ function fakeBoard({ pullRequests = [], associated = [] } = {}) {
         return { repository: { pullRequest: { id: 'PR', isDraft: false, state: 'MERGED', closingIssuesReferences: { nodes: [{ id: `ISSUE_${vars.number}` }] } } } };
       }
       if (query.includes('addProjectV2ItemById')) return { addProjectV2ItemById: { item: { id: `ITEM_${vars.contentId}` } } };
+      if (query.includes('fieldValueByName(name: "Status")')) {
+        const name = statuses[vars.itemId];
+        return { node: { fieldValueByName: name ? { name } : null } };
+      }
       if (query.includes('fieldValueByName')) return { node: { fieldValueByName: { __typename: 'ProjectV2ItemFieldIterationValue' } } };
       if (query.includes('updateProjectV2ItemFieldValue')) {
         moves.push(`${vars.itemId}:${vars.value.singleSelectOptionId}`);
@@ -258,4 +257,19 @@ test('the scheduled pass only touches recently updated open PRs', async () => {
   await reconcileOpenPullRequests({ ...board, context: { repo: { owner: 'o', repo: 'r' }, payload: {} } });
 
   assert.deepEqual(board.moves, ['ITEM_ISSUE_A:In Progress']);
+});
+
+test('the scheduled pass leaves cards blocked by failing CI for the CI result to clear', async () => {
+  const board = fakeBoard({
+    pullRequests: [
+      openPr({ number: 1, closingIssuesReferences: { nodes: [{ id: 'ISSUE_A' }] } }),
+      openPr({ number: 2, closingIssuesReferences: { nodes: [{ id: 'ISSUE_B' }] } }),
+      openPr({ number: 3, isDraft: true, closingIssuesReferences: { nodes: [{ id: 'ISSUE_C' }] } }),
+    ],
+    statuses: { ITEM_ISSUE_A: STATUS.blocked, ITEM_ISSUE_B: STATUS.inProgress, ITEM_ISSUE_C: STATUS.blocked },
+  });
+
+  await reconcileOpenPullRequests({ ...board, context: { repo: { owner: 'o', repo: 'r' }, payload: {} } });
+
+  assert.deepEqual(board.moves, ['ITEM_ISSUE_B:In Review', 'ITEM_ISSUE_C:In Progress']);
 });

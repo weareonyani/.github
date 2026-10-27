@@ -156,6 +156,18 @@ async function setIteration(github, project, itemId, fieldName, iterationId) {
   await setFieldValue(github, project, itemId, project.fields[fieldName].id, { iterationId });
 }
 
+async function cardStatus(github, itemId) {
+  const { node } = await github.graphql(
+    `query($itemId: ID!) {
+      node(id: $itemId) {
+        ... on ProjectV2Item { fieldValueByName(name: "Status") { ... on ProjectV2ItemFieldSingleSelectValue { name } } }
+      }
+    }`,
+    { itemId },
+  );
+  return node.fieldValueByName?.name ?? null;
+}
+
 async function hasSprint(github, itemId) {
   const { node } = await github.graphql(
     `query($itemId: ID!) {
@@ -234,8 +246,6 @@ async function closeLinkedIssues({ github, context, core }) {
 
 function statusForOpenPullRequest(pr) {
   if (pr.isDraft || pr.reviewDecision === 'CHANGES_REQUESTED') return STATUS.inProgress;
-  const checks = pr.commits.nodes[0]?.commit.statusCheckRollup?.state;
-  if (['FAILURE', 'ERROR'].includes(checks)) return STATUS.blocked;
   return STATUS.inReview;
 }
 
@@ -254,7 +264,6 @@ async function recentlyUpdatedPullRequests(github, owner, repo, since) {
             updatedAt
             isDraft
             reviewDecision
-            commits(last: 1) { nodes { commit { statusCheckRollup { state } } } }
             closingIssuesReferences(first: 20) { nodes { id } }
           }
         }
@@ -270,9 +279,10 @@ function sprintForToday(project) {
   return currentIteration(project.fields.Sprint.configuration.iterations, today);
 }
 
-async function moveCards({ github, core, project, cards, status, sprint }) {
+async function moveCards({ github, core, project, cards, status, sprint, keepBlocked = false }) {
   for (const contentId of cards) {
     const itemId = await addItem(github, project.id, contentId);
+    if (keepBlocked && status === STATUS.inReview && (await cardStatus(github, itemId)) === STATUS.blocked) continue;
     await setSingleSelect(github, project, itemId, 'Status', status, core);
     if (sprint && !(await hasSprint(github, itemId))) {
       await setIteration(github, project, itemId, 'Sprint', sprint.id);
@@ -301,7 +311,7 @@ async function reconcileOpenPullRequests({ github, context, core, project }) {
   for (const pr of await recentlyUpdatedPullRequests(github, owner, repo, since)) {
     const cards = cardsForPullRequest(pr);
     if (cards.length) {
-      await moveCards({ github, core, project, cards, status: statusForOpenPullRequest(pr), sprint });
+      await moveCards({ github, core, project, cards, status: statusForOpenPullRequest(pr), sprint, keepBlocked: true });
     }
   }
 }
