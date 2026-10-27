@@ -10,6 +10,7 @@ const STATUS = {
 const DAY_MS = 24 * 60 * 60 * 1000;
 const RECONCILE_WINDOW_MS = 15 * 60 * 1000;
 const SCHEDULED_EVENTS = ['schedule', 'workflow_dispatch'];
+const RELEASE_BRANCH = 'staging';
 
 function targetStatus(eventName, payload) {
   const action = payload.action;
@@ -112,7 +113,8 @@ async function pullRequestWithLinkedIssues(github, owner, repo, number) {
           id
           isDraft
           state
-          closingIssuesReferences(first: 20) { nodes { id } }
+          headRefName
+          closingIssuesReferences(first: 20) { nodes { id closed } }
         }
       }
     }`,
@@ -182,16 +184,26 @@ function cardsForPullRequest(pr) {
   return pr.closingIssuesReferences.nodes.map((n) => n.id);
 }
 
+function isReleasePullRequest(pr) {
+  return pr.headRefName === RELEASE_BRANCH;
+}
+
+function cardsInFlight(pr) {
+  if (isReleasePullRequest(pr)) return [];
+  return pr.closingIssuesReferences.nodes.filter((n) => !n.closed).map((n) => n.id);
+}
+
 async function openPullRequestCount(github, issueId) {
   const { node } = await github.graphql(
     `query($issueId: ID!) {
       node(id: $issueId) {
-        ... on Issue { closedByPullRequestsReferences(first: 1, includeClosedPrs: false) { totalCount } }
+        ... on Issue { closedByPullRequestsReferences(first: 50, includeClosedPrs: false) { nodes { headRefName } } }
       }
     }`,
     { issueId },
   );
-  return node?.closedByPullRequestsReferences?.totalCount ?? 0;
+  const pulls = node?.closedByPullRequestsReferences?.nodes ?? [];
+  return pulls.filter((pr) => !isReleasePullRequest(pr)).length;
 }
 
 async function finishedCards(github, core, cards) {
@@ -222,7 +234,7 @@ async function boardCards(github, context) {
 
   const { owner, repo } = context.repo;
   const pr = await pullRequestWithLinkedIssues(github, owner, repo, prNumber);
-  return { cards: cardsForPullRequest(pr), draft: pr.isDraft, state: pr.state };
+  return { pr, draft: pr.isDraft, state: pr.state };
 }
 
 const CLOSING_REF = /\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s*:?\s+(?:([\w.-]+)\/([\w.-]+))?#(\d+)\b/gi;
@@ -292,7 +304,8 @@ async function recentlyUpdatedPullRequests(github, owner, repo, since) {
             updatedAt
             isDraft
             reviewDecision
-            closingIssuesReferences(first: 20) { nodes { id } }
+            headRefName
+            closingIssuesReferences(first: 20) { nodes { id closed } }
           }
         }
       }
@@ -338,7 +351,7 @@ async function reconcileOpenPullRequests({ github, context, core, project }) {
   const since = new Date(Date.now() - RECONCILE_WINDOW_MS).toISOString();
   const sprint = sprintForToday(project);
   for (const pr of await recentlyUpdatedPullRequests(github, owner, repo, since)) {
-    const cards = cardsForPullRequest(pr);
+    const cards = cardsInFlight(pr);
     if (cards.length) {
       await moveCards({ github, core, project, cards, status: statusForOpenPullRequest(pr), sprint, keepBlocked: true });
     }
@@ -380,12 +393,13 @@ async function run({ github, context, core, org, projectNumber, area }) {
     return;
   }
 
-  let { cards, draft, state } = await boardCards(github, context);
+  let { cards, pr, draft, state } = await boardCards(github, context);
   if (pullRequestEventIsStale(context.eventName, context.payload.action, state)) {
     core.info(`Ignoring ${context.eventName}.${context.payload.action} for a ${state} pull request`);
     return;
   }
   if (status === STATUS.inReview && draft) status = STATUS.inProgress;
+  if (pr) cards = status === STATUS.done ? cardsForPullRequest(pr) : cardsInFlight(pr);
   if (status === STATUS.done && context.eventName === 'pull_request') cards = await finishedCards(github, core, cards);
 
   const sprint = context.eventName !== 'issues' ? sprintForToday(project) : null;
@@ -403,6 +417,7 @@ module.exports = {
   parseIssueForm,
   fieldsForNewIssue,
   cardsForPullRequest,
+  cardsInFlight,
   iterationEnd,
   currentIteration,
   loadProject,
