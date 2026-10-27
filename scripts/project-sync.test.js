@@ -146,3 +146,114 @@ test('closeLinkedIssues closes open issues and skips PRs, closed issues and fail
   assert.match(calls.comments[0].body, /staging/);
   assert.equal(warnings.length, 1);
 });
+
+const {
+  statusForOpenPullRequest,
+  syncMergedPullRequests,
+  reconcileOpenPullRequests,
+} = require('./project-sync');
+
+const openPr = (overrides = {}) => ({
+  number: 1,
+  updatedAt: new Date().toISOString(),
+  isDraft: false,
+  reviewDecision: null,
+  commits: { nodes: [{ commit: { statusCheckRollup: { state: 'SUCCESS' } } }] },
+  closingIssuesReferences: { nodes: [{ id: 'ISSUE_1' }] },
+  ...overrides,
+});
+
+test('open pull request status', () => {
+  assert.equal(statusForOpenPullRequest(openPr()), STATUS.inReview);
+  assert.equal(statusForOpenPullRequest(openPr({ isDraft: true })), STATUS.inProgress);
+  assert.equal(statusForOpenPullRequest(openPr({ reviewDecision: 'CHANGES_REQUESTED' })), STATUS.inProgress);
+  const failing = openPr({ commits: { nodes: [{ commit: { statusCheckRollup: { state: 'FAILURE' } } }] } });
+  assert.equal(statusForOpenPullRequest(failing), STATUS.blocked);
+  const pending = openPr({ commits: { nodes: [{ commit: { statusCheckRollup: null } }] } });
+  assert.equal(statusForOpenPullRequest(pending), STATUS.inReview);
+});
+
+function fakeBoard({ pullRequests = [], associated = [] } = {}) {
+  const moves = [];
+  const closes = [];
+  const github = {
+    rest: {
+      repos: { listPullRequestsAssociatedWithCommit: async () => ({ data: associated }) },
+      issues: {
+        get: async () => ({ data: { state: 'open' } }),
+        update: async (args) => closes.push(`${args.repo}#${args.issue_number}`),
+        createComment: async () => {},
+      },
+    },
+    graphql: async (query, vars) => {
+      if (query.includes('pullRequests(states: OPEN')) return { repository: { pullRequests: { nodes: pullRequests } } };
+      if (query.includes('pullRequest(number:')) {
+        return { repository: { pullRequest: { id: 'PR', isDraft: false, state: 'MERGED', closingIssuesReferences: { nodes: [{ id: `ISSUE_${vars.number}` }] } } } };
+      }
+      if (query.includes('addProjectV2ItemById')) return { addProjectV2ItemById: { item: { id: `ITEM_${vars.contentId}` } } };
+      if (query.includes('fieldValueByName')) return { node: { fieldValueByName: { __typename: 'ProjectV2ItemFieldIterationValue' } } };
+      if (query.includes('updateProjectV2ItemFieldValue')) {
+        moves.push(`${vars.itemId}:${vars.value.singleSelectOptionId}`);
+        return {};
+      }
+      throw new Error(`unexpected query: ${query.slice(0, 40)}`);
+    },
+  };
+  const project = {
+    id: 'P',
+    fields: {
+      Status: { id: 'S', options: Object.values(STATUS).map((name) => ({ id: name, name })) },
+      Sprint: { id: 'SP', configuration: { iterations: [] } },
+    },
+  };
+  return { github, project, moves, closes, core: { info: () => {}, warning: () => {} } };
+}
+
+test('a push moves the cards of PRs merged into that branch to Done and closes issues off the default branch', async () => {
+  const board = fakeBoard({
+    associated: [
+      { number: 5, merged_at: '2026-10-27T00:00:00Z', base: { ref: 'staging' }, body: 'Closes #50' },
+      { number: 6, merged_at: null, base: { ref: 'staging' }, body: 'Closes #60' },
+      { number: 7, merged_at: '2026-10-27T00:00:00Z', base: { ref: 'main' }, body: 'Closes #70' },
+    ],
+  });
+  const context = {
+    repo: { owner: 'o', repo: 'r' },
+    payload: { ref: 'refs/heads/staging', after: 'abc', repository: { default_branch: 'main' } },
+  };
+
+  await syncMergedPullRequests({ ...board, context });
+
+  assert.deepEqual(board.moves, ['ITEM_ISSUE_5:Done']);
+  assert.deepEqual(board.closes, ['r#50']);
+});
+
+test('a push to the default branch moves cards without closing issues itself', async () => {
+  const board = fakeBoard({
+    associated: [{ number: 7, merged_at: '2026-10-27T00:00:00Z', base: { ref: 'main' }, body: 'Closes #70' }],
+  });
+  const context = {
+    repo: { owner: 'o', repo: 'r' },
+    payload: { ref: 'refs/heads/main', after: 'abc', repository: { default_branch: 'main' } },
+  };
+
+  await syncMergedPullRequests({ ...board, context });
+
+  assert.deepEqual(board.moves, ['ITEM_ISSUE_7:Done']);
+  assert.deepEqual(board.closes, []);
+});
+
+test('the scheduled pass only touches recently updated open PRs', async () => {
+  const stale = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+  const board = fakeBoard({
+    pullRequests: [
+      openPr({ number: 1, isDraft: true, closingIssuesReferences: { nodes: [{ id: 'ISSUE_A' }] } }),
+      openPr({ number: 2, updatedAt: stale, closingIssuesReferences: { nodes: [{ id: 'ISSUE_B' }] } }),
+      openPr({ number: 3, closingIssuesReferences: { nodes: [] } }),
+    ],
+  });
+
+  await reconcileOpenPullRequests({ ...board, context: { repo: { owner: 'o', repo: 'r' }, payload: {} } });
+
+  assert.deepEqual(board.moves, ['ITEM_ISSUE_A:In Progress']);
+});
