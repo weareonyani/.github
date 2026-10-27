@@ -127,6 +127,7 @@ test('closeLinkedIssues closes open issues and skips PRs, closed issues and fail
         createComment: async (args) => calls.comments.push(args),
       },
     },
+    graphql: async () => ({ node: { closedByPullRequestsReferences: { totalCount: 0 } } }),
   };
   const warnings = [];
   const core = { info: () => {}, warning: (m) => warnings.push(m) };
@@ -168,19 +169,22 @@ test('open pull request status', () => {
   assert.equal(statusForOpenPullRequest(openPr({ reviewDecision: 'CHANGES_REQUESTED' })), STATUS.inProgress);
 });
 
-function fakeBoard({ pullRequests = [], associated = [], statuses = {} } = {}) {
+function fakeBoard({ pullRequests = [], associated = [], statuses = {}, stillOpen = [] } = {}) {
   const moves = [];
   const closes = [];
   const github = {
     rest: {
       repos: { listPullRequestsAssociatedWithCommit: async () => ({ data: associated }) },
       issues: {
-        get: async () => ({ data: { state: 'open' } }),
+        get: async ({ issue_number }) => ({ data: { state: 'open', node_id: `ISSUE_${issue_number}` } }),
         update: async (args) => closes.push(`${args.repo}#${args.issue_number}`),
         createComment: async () => {},
       },
     },
     graphql: async (query, vars) => {
+      if (query.includes('closedByPullRequestsReferences')) {
+        return { node: { closedByPullRequestsReferences: { totalCount: stillOpen.includes(vars.issueId) ? 1 : 0 } } };
+      }
       if (query.includes('pullRequests(states: OPEN')) return { repository: { pullRequests: { nodes: pullRequests } } };
       if (query.includes('pullRequest(number:')) {
         return { repository: { pullRequest: { id: 'PR', isDraft: false, state: 'MERGED', closingIssuesReferences: { nodes: [{ id: `ISSUE_${vars.number}` }] } } } };
@@ -227,6 +231,25 @@ test('a push moves the cards of PRs merged into that branch to Done and closes i
 
   assert.deepEqual(board.moves, ['ITEM_ISSUE_5:Done']);
   assert.deepEqual(board.closes, ['r#50']);
+});
+
+test('a push leaves issues that other open PRs still close open and off Done', async () => {
+  const board = fakeBoard({
+    associated: [
+      { number: 5, merged_at: '2026-10-27T00:00:00Z', base: { ref: 'staging' }, body: 'Closes #5' },
+      { number: 8, merged_at: '2026-10-27T00:00:00Z', base: { ref: 'staging' }, body: 'Closes #8' },
+    ],
+    stillOpen: ['ISSUE_5'],
+  });
+  const context = {
+    repo: { owner: 'o', repo: 'r' },
+    payload: { ref: 'refs/heads/staging', after: 'abc', repository: { default_branch: 'main' } },
+  };
+
+  await syncMergedPullRequests({ ...board, context });
+
+  assert.deepEqual(board.moves, ['ITEM_ISSUE_8:Done']);
+  assert.deepEqual(board.closes, ['r#8']);
 });
 
 test('a push to the default branch moves cards without closing issues itself', async () => {

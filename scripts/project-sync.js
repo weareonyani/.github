@@ -182,6 +182,30 @@ function cardsForPullRequest(pr) {
   return pr.closingIssuesReferences.nodes.map((n) => n.id);
 }
 
+async function openPullRequestCount(github, issueId) {
+  const { node } = await github.graphql(
+    `query($issueId: ID!) {
+      node(id: $issueId) {
+        ... on Issue { closedByPullRequestsReferences(first: 1, includeClosedPrs: false) { totalCount } }
+      }
+    }`,
+    { issueId },
+  );
+  return node?.closedByPullRequestsReferences?.totalCount ?? 0;
+}
+
+async function finishedCards(github, core, cards) {
+  const finished = [];
+  for (const contentId of cards) {
+    if (await openPullRequestCount(github, contentId)) {
+      core.info(`${contentId} still has open pull requests`);
+    } else {
+      finished.push(contentId);
+    }
+  }
+  return finished;
+}
+
 function pullRequestEventIsStale(eventName, action, prState) {
   if (!prState || prState === 'OPEN') return false;
   return !(eventName === 'pull_request' && action === 'closed');
@@ -230,6 +254,10 @@ async function closeLinkedIssues({ github, context, core }) {
     try {
       const { data: issue } = await github.rest.issues.get({ owner: ref.owner, repo: ref.repo, issue_number: ref.number });
       if (issue.pull_request || issue.state === 'closed') continue;
+      if (await openPullRequestCount(github, issue.node_id)) {
+        core.info(`${label} still has open pull requests`);
+        continue;
+      }
       await github.rest.issues.createComment({
         owner: ref.owner, repo: ref.repo, issue_number: ref.number,
         body: `Closed by ${owner}/${repo}#${pull.number}, merged into \`${pull.base.ref}\`. GitHub only auto-closes issues for merges into the default branch.`,
@@ -297,7 +325,8 @@ async function syncMergedPullRequests({ github, context, core, project }) {
   const sprint = sprintForToday(project);
   for (const pull of await mergedPullRequests(github, owner, repo, context.payload.after, branch)) {
     const pr = await pullRequestWithLinkedIssues(github, owner, repo, pull.number);
-    await moveCards({ github, core, project, cards: cardsForPullRequest(pr), status: STATUS.done, sprint });
+    const cards = await finishedCards(github, core, cardsForPullRequest(pr));
+    await moveCards({ github, core, project, cards, status: STATUS.done, sprint });
     if (branch !== context.payload.repository.default_branch) {
       await closeLinkedIssues({ github, context: { repo: { owner, repo }, payload: { pull_request: pull } }, core });
     }
@@ -351,12 +380,13 @@ async function run({ github, context, core, org, projectNumber, area }) {
     return;
   }
 
-  const { cards, draft, state } = await boardCards(github, context);
+  let { cards, draft, state } = await boardCards(github, context);
   if (pullRequestEventIsStale(context.eventName, context.payload.action, state)) {
     core.info(`Ignoring ${context.eventName}.${context.payload.action} for a ${state} pull request`);
     return;
   }
   if (status === STATUS.inReview && draft) status = STATUS.inProgress;
+  if (status === STATUS.done && context.eventName === 'pull_request') cards = await finishedCards(github, core, cards);
 
   const sprint = context.eventName !== 'issues' ? sprintForToday(project) : null;
   await moveCards({ github, core, project, cards, status, sprint });
