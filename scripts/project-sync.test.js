@@ -321,3 +321,22 @@ test('the scheduled pass skips closed issues and release PRs', async () => {
 
   assert.deepEqual(board.moves, ['ITEM_ISSUE_B:In Progress']);
 });
+
+test('adding a card that another run already added returns the existing card', async () => {
+  const { addItem } = require('./project-sync');
+  const github = {
+    graphql: async (query) => {
+      if (query.includes('addProjectV2ItemById')) {
+        throw new Error('Request failed due to following response errors:\n - Content already exists in this project');
+      }
+      return { node: { projectItems: { nodes: [{ id: 'OTHER', project: { id: 'X' } }, { id: 'ITEM_1', project: { id: 'P' } }] } } };
+    },
+  };
+  assert.equal(await addItem(github, 'P', 'ISSUE_1'), 'ITEM_1');
+});
+
+test('other errors while adding a card still fail the run', async () => {
+  const { addItem } = require('./project-sync');
+  const github = { graphql: async () => { throw new Error('Resource not accessible by integration'); } };
+  await assert.rejects(addItem(github, 'P', 'ISSUE_1'), /not accessible/);
+});
