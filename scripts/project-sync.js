@@ -123,14 +123,36 @@ async function pullRequestWithLinkedIssues(github, owner, repo, number) {
   return repository.pullRequest;
 }
 
-async function addItem(github, projectId, contentId) {
-  const { addProjectV2ItemById } = await github.graphql(
-    `mutation($projectId: ID!, $contentId: ID!) {
-      addProjectV2ItemById(input: { projectId: $projectId, contentId: $contentId }) { item { id } }
+const ALREADY_ON_BOARD = /already exists in this project/i;
+
+async function existingItem(github, projectId, contentId) {
+  const { node } = await github.graphql(
+    `query($contentId: ID!) {
+      node(id: $contentId) {
+        ... on Issue { projectItems(first: 20) { nodes { id project { id } } } }
+        ... on PullRequest { projectItems(first: 20) { nodes { id project { id } } } }
+      }
     }`,
-    { projectId, contentId },
+    { contentId },
   );
-  return addProjectV2ItemById.item.id;
+  const item = node?.projectItems?.nodes.find((n) => n.project.id === projectId);
+  if (!item) throw new Error(`${contentId} is on the board but its card was not found`);
+  return item.id;
+}
+
+async function addItem(github, projectId, contentId) {
+  try {
+    const { addProjectV2ItemById } = await github.graphql(
+      `mutation($projectId: ID!, $contentId: ID!) {
+        addProjectV2ItemById(input: { projectId: $projectId, contentId: $contentId }) { item { id } }
+      }`,
+      { projectId, contentId },
+    );
+    return addProjectV2ItemById.item.id;
+  } catch (error) {
+    if (!ALREADY_ON_BOARD.test(String(error?.message))) throw error;
+    return existingItem(github, projectId, contentId);
+  }
 }
 
 async function setFieldValue(github, project, itemId, fieldId, value) {
@@ -412,6 +434,7 @@ async function run({ github, context, core, org, projectNumber, area }) {
 
 module.exports = {
   STATUS,
+  addItem,
   targetStatus,
   pullRequestEventIsStale,
   parseIssueForm,
